@@ -4,6 +4,8 @@ import com.jpmc.midascore.entity.UserRecord;
 import com.jpmc.midascore.repository.UserRepository;
 import org.springframework.stereotype.Component;
 
+import java.util.Optional;
+
 @Component
 public class DatabaseConduit {
     private final UserRepository userRepository;
@@ -16,4 +18,12 @@ public class DatabaseConduit {
         userRepository.save(userRecord);
     }
 
+    public Optional<UserRecord> findUserById(Long id) {
+        return userRepository.findById(id);
+    }
+
+    public void updateUserBalance(UserRecord user, float newBalance) {
+        user.setBalance(newBalance);
+        userRepository.save(user);
+    }
 }
