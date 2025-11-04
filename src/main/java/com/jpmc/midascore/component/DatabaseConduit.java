@@ -22,8 +22,16 @@ public class DatabaseConduit {
         return userRepository.findById(id);
     }
 
+    public Optional<UserRecord> findUserByIdWithLock(Long id) {
+        return userRepository.findByIdWithLock(id);
+    }
+
     public void updateUserBalance(UserRecord user, float newBalance) {
         user.setBalance(newBalance);
         userRepository.save(user);
+    }
+
+    public Optional<UserRecord> findUserByName(String name) {
+        return userRepository.findByName(name);
     }
 }

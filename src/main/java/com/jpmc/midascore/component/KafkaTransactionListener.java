@@ -27,15 +27,27 @@ public class KafkaTransactionListener {
     @KafkaListener(topics = "${general.kafka-topic}", groupId = "midas-core-group")
     @Transactional
     public void receiveTransaction(Transaction transaction) {
-        logger.debug("Received transaction: {}", transaction);
+        logger.info("Received transaction: {}", transaction);
 
-        // Fetch sender and recipient
-        Optional<UserRecord> senderOpt = databaseConduit.findUserById(transaction.getSenderId());
-        Optional<UserRecord> recipientOpt = databaseConduit.findUserById(transaction.getRecipientId());
+        // Fetch sender and recipient with pessimistic lock to prevent race conditions
+        // Lock in ID order to prevent deadlocks
+        long senderId = transaction.getSenderId();
+        long recipientId = transaction.getRecipientId();
+        Optional<UserRecord> senderOpt, recipientOpt;
+        
+        if (senderId < recipientId) {
+            // Lock sender first, then recipient
+            senderOpt = databaseConduit.findUserByIdWithLock(senderId);
+            recipientOpt = databaseConduit.findUserByIdWithLock(recipientId);
+        } else {
+            // Lock recipient first, then sender (because recipient has smaller ID)
+            recipientOpt = databaseConduit.findUserByIdWithLock(recipientId);
+            senderOpt = databaseConduit.findUserByIdWithLock(senderId);
+        }
 
         // Validate transaction
         if (!isValidTransaction(transaction, senderOpt, recipientOpt)) {
-            logger.debug("Transaction invalid, discarding: {}", transaction);
+            logger.info("Transaction invalid, discarding: {}", transaction);
             return;
         }
 
@@ -47,14 +59,15 @@ public class KafkaTransactionListener {
         TransactionRecord transactionRecord = new TransactionRecord(sender, recipient, transaction.getAmount());
         transactionRepository.save(transactionRecord);
 
-        // Update balances
+
+        // Update balances based on current database state
         float senderNewBalance = sender.getBalance() - transaction.getAmount();
         float recipientNewBalance = recipient.getBalance() + transaction.getAmount();
 
         databaseConduit.updateUserBalance(sender, senderNewBalance);
         databaseConduit.updateUserBalance(recipient, recipientNewBalance);
 
-        logger.debug("Transaction processed successfully: sender {} balance updated to {}, recipient {} balance updated to {}",
+        logger.info("Transaction processed successfully: sender {} balance updated to {}, recipient {} balance updated to {}",
                 sender.getId(), senderNewBalance, recipient.getId(), recipientNewBalance);
     }
 
