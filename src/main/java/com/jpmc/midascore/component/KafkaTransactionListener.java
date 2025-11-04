@@ -2,6 +2,7 @@ package com.jpmc.midascore.component;
 
 import com.jpmc.midascore.entity.TransactionRecord;
 import com.jpmc.midascore.entity.UserRecord;
+import com.jpmc.midascore.foundation.Incentive;
 import com.jpmc.midascore.foundation.Transaction;
 import com.jpmc.midascore.repository.TransactionRepository;
 import org.slf4j.Logger;
@@ -18,16 +19,18 @@ public class KafkaTransactionListener {
 
     private final DatabaseConduit databaseConduit;
     private final TransactionRepository transactionRepository;
+    private final IncentiveService incentiveService;
 
-    public KafkaTransactionListener(DatabaseConduit databaseConduit, TransactionRepository transactionRepository) {
+    public KafkaTransactionListener(DatabaseConduit databaseConduit, TransactionRepository transactionRepository, IncentiveService incentiveService) {
         this.databaseConduit = databaseConduit;
         this.transactionRepository = transactionRepository;
+        this.incentiveService = incentiveService;
     }
 
     @KafkaListener(topics = "${general.kafka-topic}", groupId = "midas-core-group")
     @Transactional
     public void receiveTransaction(Transaction transaction) {
-        logger.info("Received transaction: {}", transaction);
+        logger.debug("Received transaction: {}", transaction);
 
         // Fetch sender and recipient with pessimistic lock to prevent race conditions
         // Lock in ID order to prevent deadlocks
@@ -47,7 +50,7 @@ public class KafkaTransactionListener {
 
         // Validate transaction
         if (!isValidTransaction(transaction, senderOpt, recipientOpt)) {
-            logger.info("Transaction invalid, discarding: {}", transaction);
+            logger.debug("Transaction invalid, discarding: {}", transaction);
             return;
         }
 
@@ -55,20 +58,33 @@ public class KafkaTransactionListener {
         UserRecord sender = senderOpt.get();
         UserRecord recipient = recipientOpt.get();
 
-        // Create and save transaction record
-        TransactionRecord transactionRecord = new TransactionRecord(sender, recipient, transaction.getAmount());
+        // Call incentive API after validation
+        // If API call fails, default incentive to 0.0f to ensure transaction still processes
+        float incentiveAmount = 0.0f;
+        try {
+            Incentive incentive = incentiveService.getIncentive(transaction);
+            incentiveAmount = incentive != null ? incentive.getAmount() : 0.0f;
+        } catch (Exception e) {
+            logger.warn("Failed to get incentive for transaction {}, defaulting to 0.0: {}", transaction, e.getMessage());
+            incentiveAmount = 0.0f;
+        }
+
+        // Create and save transaction record with incentive
+        TransactionRecord transactionRecord = new TransactionRecord(sender, recipient, transaction.getAmount(), incentiveAmount);
         transactionRepository.save(transactionRecord);
 
 
         // Update balances based on current database state
+        // Sender balance is reduced by transaction amount only (incentive is not deducted from sender)
         float senderNewBalance = sender.getBalance() - transaction.getAmount();
-        float recipientNewBalance = recipient.getBalance() + transaction.getAmount();
+        // Recipient balance is increased by transaction amount plus incentive
+        float recipientNewBalance = recipient.getBalance() + transaction.getAmount() + incentiveAmount;
 
         databaseConduit.updateUserBalance(sender, senderNewBalance);
         databaseConduit.updateUserBalance(recipient, recipientNewBalance);
 
-        logger.info("Transaction processed successfully: sender {} balance updated to {}, recipient {} balance updated to {}",
-                sender.getId(), senderNewBalance, recipient.getId(), recipientNewBalance);
+        logger.debug("Transaction processed successfully: sender {} balance updated to {}, recipient {} balance updated to {} (incentive: {})",
+                sender.getId(), senderNewBalance, recipient.getId(), recipientNewBalance, incentiveAmount);
     }
 
     private boolean isValidTransaction(Transaction transaction, Optional<UserRecord> senderOpt, Optional<UserRecord> recipientOpt) {
